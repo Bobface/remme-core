@@ -41,11 +41,22 @@ class BlockInfoClient(BasicClient):
         async def _get_block_data(i):
             try:
                 bi = await self.get_block_info(i)
-                block = await self.list_blocks([bi.header_signature])
             except Exception as e:
                 LOGGER.exception(e)
-            else:
-                return self.interpret_block_info(bi, block)
+                return
+            
+            try:
+                pbi = await self.get_block_info(i + 1)
+                block = await self.list_blocks([pbi.header_signature])
+            except KeyNotFound:
+                # error occured in zero block, because of non existing address,
+                # block was mined through through initial deploy
+                block = {'data': [{'consensus': {'previous_cert_votes': []}}]}
+            except Exception as e:
+                LOGGER.exception(e)
+                return
+
+            return self.interpret_block_info(bi, block)
 
         blocks = await asyncio.gather(*(_get_block_data(i)
                                         for i in range(start - limit, start)))
@@ -65,9 +76,11 @@ class BlockInfoClient(BasicClient):
 
     @staticmethod
     def interpret_block_info(block_info, block):
-        return {"block_number": block_info.block_num + 1,
-                "timestamp": block_info.timestamp,
-                "previous_header_signature": block_info.previous_block_id,
-                "signer_public_key": block_info.signer_public_key,
-                "header_signature": block_info.header_signature,
-                "consensus": block['data'][0]['consensus']}
+        return {
+            "block_number": block_info.block_num + 1,
+            "timestamp": block_info.timestamp,
+            "previous_header_signature": block_info.previous_block_id,
+            "signer_public_key": block_info.signer_public_key,
+            "header_signature": block_info.header_signature,
+            "cert_votes": block['data'][0]['consensus']['previous_cert_votes']
+        }
