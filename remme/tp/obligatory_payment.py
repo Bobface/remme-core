@@ -33,6 +33,11 @@ from remme.protos.obligatory_payment_pb2 import (
 from remme.protos.node_account_pb2 import (
     NodeAccount
 )
+from remme.settings import (
+    CONSENSUS_ALLOWED_VALIDATORS,
+    SETTINGS_OBLIGATORY_PAYMENT,
+    SETTINGS_COMMITTEE_SIZE
+)
 
 from remme.shared.forms import (
     ObligatoryPaymentPayloadForm,
@@ -54,6 +59,15 @@ FAMILY_NAME = 'obligatory_payment'
 FAMILY_VERSIONS = ['0.1']
 
 
+def pay_obligatory_payment(node_account, obligatory_payment):
+    if node_account.operational >= obligatory_payment:
+        node_account.operational -= obligatory_payment
+    elif node_account.reputation.unfrozen >= obligatory_payment:
+        node_account.reputation.unfrozen -= obligatory_payment
+    else:
+        node_account.reputation.frozen -= obligatory_payment
+
+
 class ObligatoryPaymentHandler(BasicHandler):
     def __init__(self):
         super().__init__(FAMILY_NAME, FAMILY_VERSIONS)
@@ -72,10 +86,22 @@ class ObligatoryPaymentHandler(BasicHandler):
 
         node_account = get_data(context, NodeAccount, node_account_address)
 
-        #TODO: implement OP logic.
-
         if node_account is None:
             node_account = NodeAccount()
+
+        committee_pub_keys = _get_setting_value(context, CONSENSUS_ALLOWED_VALIDATORS)
+        if committee_pub_keys is None or type(committee_pub_keys) != list:
+            raise InvalidTransaction('remme.consensus.allowed_validators is malformed. Should be not list of public keys.')
+
+        obligatory_payment = _get_setting_value(context, SETTINGS_OBLIGATORY_PAYMENT)
+        committee_size = _get_setting_value(context, SETTINGS_COMMITTEE_SIZE)
+
+        for pub_key in committee_pub_keys:
+            address = self.make_address_from_data(pub_key)
+            committee_node_account = get_data(context, NodeAccount, address)
+            pay_obligatory_payment(committee_node_account, obligatory_payment)
+
+        node_account.reputation.unfrozen += committee_size*obligatory_payment
 
         return {
             node_account_address: node_account,
