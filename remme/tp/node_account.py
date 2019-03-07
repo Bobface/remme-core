@@ -20,6 +20,7 @@ from sawtooth_validator.journal.batch_injector import BatchInjector
 from sawtooth_validator.protobuf.batch_pb2 import (
     Batch,
     BatchHeader,
+    BlockHeader,
 )
 
 from remme.protos.node_account_pb2 import (
@@ -61,6 +62,9 @@ from remme.shared.utils import hash512
 from remme.settings.helper import _get_setting_value
 LOGGER = logging.getLogger(__name__)
 
+MINIMUM_REWARD = 0.45
+DEFROST_ACCELERATION = 10
+
 FAMILY_NAME = 'node_account'
 FAMILY_VERSIONS = ['0.1']
 
@@ -93,10 +97,12 @@ class NodeAccountHandler(BasicHandler):
             },
         }
 
+    def get_block_cost(self):
+        pass
+
     @staticmethod
-    def get_list_node_account_blocks(context, node_account_public_key):
+    def get_latest_block_time(context):
         block_info_config = get_data(context, BlockInfoConfig, CONFIG_ADDRESS)
-        node_account_blocks = []
 
         if not block_info_config:
             raise InvalidTransaction('Block config not found.')
@@ -106,12 +112,20 @@ class NodeAccountHandler(BasicHandler):
             BlockInfo,
             BlockInfoClient.create_block_address(block_info_config.latest_block),
         )
-        latest_block_time = datetime.fromtimestamp(latest_block.timestamp)
+        return datetime.fromtimestamp(latest_block.timestamp)
+
+    def get_list_node_account_blocks(self, context, node_account_public_key):
+        block_info_config = get_data(context, BlockInfoConfig, CONFIG_ADDRESS)
+        node_account_blocks = []
+
+        if not block_info_config:
+            raise InvalidTransaction('Block config not found.')
+
+        latest_block_time = self.get_latest_block_time(context)
 
         for current_block in range(block_info_config.latest_block, block_info_config.oldest_block, -1):
             current_block_addr = BlockInfoClient.create_block_address(current_block)
             current_block_info = get_data(context, BlockInfo, current_block_addr)
-            # current_block_time = datetime.fromtimestamp(block_info.timestamp)
 
             if latest_block_time - datetime.fromtimestamp(current_block_info.timestamp) > PUB_KEY_MAX_VALIDITY:
                 break
@@ -139,19 +153,17 @@ class NodeAccountHandler(BasicHandler):
         # node_reputation = node_account.reputation.frozen + node_account.reputation.unfrozen
         minimum_stake = int(minimum_stake)
         max_reward = 1 - int(blockchain_tax)
-        min_reward = .45
-        defrost_acceleration = 10
 
         if node_account.reputation.frozen < minimum_stake:
             raise InvalidTransaction('Frozen balance is lower than the minimum stake.')
 
-        if node_account.reputation.frozen >= defrost_acceleration * minimum_stake:
+        if node_account.reputation.frozen >= DEFROST_ACCELERATION * minimum_stake:
             return max_reward
 
-        reward_span = (max_reward - min_reward) / (defrost_acceleration - 1)
+        reward_span = (max_reward - MINIMUM_REWARD) / (DEFROST_ACCELERATION - 1)
         quantity_stakes = (node_account.reputation.frozen - minimum_stake) / minimum_stake
 
-        available_pct_distribution_reward = reward_span * quantity_stakes + min_reward
+        available_pct_distribution_reward = reward_span * quantity_stakes + MINIMUM_REWARD
 
         return available_pct_distribution_reward
 
@@ -176,17 +188,17 @@ class NodeAccountHandler(BasicHandler):
 
         max_reward = 1 - int(blockchain_tax)
 
-        block_price = 1000  # Replace by real block price
+        block_cost = 1000  # Replace by real block price
 
         pct_distribution_reward = self._get_available_pct_distribution_reward(context, node_account_public_key)
-
         node_account_blocks = self.get_list_node_account_blocks(context, node_account_public_key)
+        latest_block_time = self.get_latest_block_time(context)
 
         amount_defrosting_tokens_to_unfrozen = 0
         for block in node_account_blocks:
-            time_rate = block.timestamp / PUB_KEY_MAX_VALIDITY
+            time_rate = (latest_block_time - datetime.fromtimestamp(block.timestamp)) / PUB_KEY_MAX_VALIDITY
 
-            amount_defrosting_tokens_to_unfrozen += (max_reward - pct_distribution_reward) * time_rate * block_price
+            amount_defrosting_tokens_to_unfrozen += (max_reward - pct_distribution_reward) * time_rate * block_cost
 
         return amount_defrosting_tokens_to_unfrozen
 
@@ -340,3 +352,12 @@ class NodeAccountHandler(BasicHandler):
                 transactions=[transaction],
                 header_signature=batch_signature,
             )
+
+        def block_start(self, previous_block):
+            """Returns an ordered list of batches to inject at the beginning of the
+            block. Can also return None if no batches should be injected.
+            Args:
+                previous_block (Block): The previous block.
+            Returns:
+                A list of batches to inject.
+            """
